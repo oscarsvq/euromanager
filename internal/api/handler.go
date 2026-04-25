@@ -57,7 +57,7 @@ func HandleParse(w http.ResponseWriter, r *http.Request) {
 
 	if data[0] == 0x76 {
 		// Archivo de unidad de vehículo (VU)
-		fileType = "vu"
+		fileType = "vehicle_unit"
 		generation = detectVUGeneration(data)
 
 		var vu decoder.Vu
@@ -69,7 +69,7 @@ func HandleParse(w http.ResponseWriter, r *http.Request) {
 		parsed = vu
 	} else {
 		// Archivo de tarjeta de conductor
-		fileType = "card"
+		fileType = "driver_card"
 		generation = detectCardGeneration(data)
 
 		var card decoder.Card
