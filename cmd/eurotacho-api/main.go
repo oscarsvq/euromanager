@@ -19,6 +19,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", api.HandleHealth)
+	mux.HandleFunc("/api/v1/parse", api.HandleParse)
 
 	log.Printf("EuroTacho API v%s escuchando en :%s", api.ParserVersion, port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
