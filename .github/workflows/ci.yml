@@ -1,0 +1,21 @@
+name: CI
+
+# Red de seguridad del parser: vet + tests en cada push/PR. Incluye los tests
+# negativos de verificacion de firma (un TGD manipulado NO debe dar 'valid').
+# Si la verificacion de firmas se rompe, el build falla y no se puede mergear.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: go vet
+        run: go vet ./pkg/... ./internal/...
+      - name: go test (incluye firmas: positivo genuino + negativo manipulado)
+        run: go test ./...
