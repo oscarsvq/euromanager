@@ -18,6 +18,19 @@ import (
 // This function is meant to decode driver card data.
 // inter needs to be a pointer, otherwise the code will panic!
 func UnmarshalTLV(data []byte, inter interface{}) (verified bool, err error) {
+	res, err := VerifyTLV(data, inter)
+	if res != nil {
+		verified = res.Verified()
+	}
+	return verified, err
+}
+
+// VerifyTLV decodes driver card data like UnmarshalTLV but returns a forensic VerificationResult
+// with the 4-state aggregation (valid|invalid|no_cert|error) instead of a single bool.
+// inter needs to be a pointer, otherwise the code will panic!
+func VerifyTLV(data []byte, inter interface{}) (result *VerificationResult, err error) {
+	res := &VerificationResult{}
+	result = res
 	defer func() {
 		// recover from panic if one occurred.
 		if r := recover(); r != nil {
@@ -30,7 +43,6 @@ func UnmarshalTLV(data []byte, inter interface{}) (verified bool, err error) {
 				// Fallback err (per specs, error strings should be lowercase w/o punctuation
 				err = errors.New("unknown panic")
 			}
-			verified = false
 		}
 	}()
 	pt := reflect.TypeOf(inter)
@@ -148,6 +160,8 @@ func UnmarshalTLV(data []byte, inter interface{}) (verified bool, err error) {
 			}
 		}
 	}
+	// FORENSE: el certificado de firma solo es de confianza si Decode() devuelve nil, lo que ahora
+	// EXIGE que la cadena valide hasta ERCA (firma del cert valida contra su CA y ventana de validez).
 	signCertificateFirstGenValid := false
 	if err := signCertificateFirstGen.Decode(); err == nil {
 		signCertificateFirstGenValid = true
@@ -156,8 +170,6 @@ func UnmarshalTLV(data []byte, inter interface{}) (verified bool, err error) {
 	if err := signCertificateSecondGen.Decode(); err == nil {
 		signCertificateSecondGenValid = true
 	}
-	verified = false
-	verificationStarted := false
 	// second pass - signatures
 	for currentPos := 0; currentPos < len(data) && len(data[currentPos:]) > 2; {
 		var currentTag [3]byte
@@ -181,9 +193,13 @@ func UnmarshalTLV(data []byte, inter interface{}) (verified bool, err error) {
 			// log.Printf("size: %v", size)
 			currentPos += 2
 			if len(data[currentPos:]) >= int(size) && size > 0 && found && (currentTag[2]&0x01) == 1 {
-				_, _, _, err := parseASN1Field(field, field.Type(), -1, 0, 0, int(size), 0, data[currentPos:currentPos+int(size)], nil, globalSizes)
-				if err != nil {
-					log.Printf("error: %v (ignored, skip ahead to next tag)", err)
+				// Este es un tag de FIRMA: cuenta como un bloque firmado. La agregacion es estricta,
+				// asi que TODO desenlace (incluido "saltado por falta de cert") se registra y nunca
+				// se ignora silenciosamente (antes un bloque sin cert/firma no marcaba verified=false).
+				_, _, _, perr := parseASN1Field(field, field.Type(), -1, 0, 0, int(size), 0, data[currentPos:currentPos+int(size)], nil, globalSizes)
+				if perr != nil {
+					log.Printf("error: %v (signature block unparseable)", perr)
+					res.noteError()
 				} else {
 					var signForTag [3]byte
 					signForTag[0] = currentTag[0]
@@ -191,45 +207,61 @@ func UnmarshalTLV(data []byte, inter interface{}) (verified bool, err error) {
 					signForTag[2] = currentTag[2] - 1
 					switch currentTag[2] {
 					case 0x01: // 1st gen
-						if dr, ok := dataRangeSignatureFirstGenMap[signForTag]; signCertificateFirstGenValid && ok {
+						dr, ok := dataRangeSignatureFirstGenMap[signForTag]
+						switch {
+						case !ok:
+							// firma sin su bloque de datos correspondiente: no se puede verificar
+							res.noteNoCert()
+						case !signCertificateFirstGenValid:
+							// no hay cert de firma de confianza para esta generacion
+							res.noteNoCert()
+						default:
 							if currentSignature, ok := field.Interface().(SignatureFirstGen); ok {
-								if ver, err := currentSignature.Verify(signCertificateFirstGen, data[dr.start:dr.start+dr.length]); err == nil {
+								if ver, verr := currentSignature.Verify(signCertificateFirstGen, data[dr.start:dr.start+dr.length]); verr == nil {
 									if dr.VerifiedField.IsValid() && dr.VerifiedField.CanSet() {
 										dr.VerifiedField.SetBool(ver)
 									}
-									if !verificationStarted {
-										verified = ver
+									if ver {
+										res.noteOK()
 									} else {
-										verified = verified && ver
+										res.noteInvalid()
 									}
 								} else {
-									log.Printf("error: could not verify: %v", err)
-									verified = false
+									log.Printf("error: could not verify: %v", verr)
+									res.noteError()
 								}
+							} else {
+								res.noteError()
 							}
 						}
 					case 0x03: // 2nd gen
-						if dr, ok := dataRangeSignatureSecondGenMap[signForTag]; signCertificateSecondGenValid && ok {
+						dr, ok := dataRangeSignatureSecondGenMap[signForTag]
+						switch {
+						case !ok:
+							res.noteNoCert()
+						case !signCertificateSecondGenValid:
+							res.noteNoCert()
+						default:
 							if currentSignature, ok := field.Interface().(SignatureSecondGen); ok {
-								if ver, err := currentSignature.Verify(signCertificateSecondGen, data[dr.start:dr.start+dr.length]); err == nil {
-									// it seems not to be enough to call Verify on the Signature struct, we also need to set the Verified field manually
+								if ver, verr := currentSignature.Verify(signCertificateSecondGen, data[dr.start:dr.start+dr.length]); verr == nil {
 									if dr.VerifiedField.IsValid() && dr.VerifiedField.CanSet() {
 										dr.VerifiedField.SetBool(ver)
 									}
-									if !verificationStarted {
-										verified = ver
+									if ver {
+										res.noteOK()
 									} else {
-										verified = verified && ver
+										res.noteInvalid()
 									}
 								} else {
-									log.Printf("error: could not verify: %v", err)
-									verified = false
+									log.Printf("error: could not verify: %v", verr)
+									res.noteError()
 								}
+							} else {
+								res.noteError()
 							}
 						}
 					}
 				}
-				verificationStarted = true
 			}
 			if len(data[currentPos:]) >= int(size) {
 				currentPos += int(size)
@@ -243,12 +275,25 @@ func UnmarshalTLV(data []byte, inter interface{}) (verified bool, err error) {
 		}
 	}
 
-	return verified, nil
+	return res, nil
 }
 
 // inter needs to be a pointer, otherwise the code will panic!
 // returns true if the contents are verified
 func UnmarshalTV(data []byte, inter interface{}) (verified bool, err error) {
+	res, err := VerifyTV(data, inter)
+	if res != nil {
+		verified = res.Verified()
+	}
+	return verified, err
+}
+
+// VerifyTV decodes VU data like UnmarshalTV but returns a forensic VerificationResult with the
+// 4-state aggregation (valid|invalid|no_cert|error) instead of a single bool.
+// inter needs to be a pointer, otherwise the code will panic!
+func VerifyTV(data []byte, inter interface{}) (result *VerificationResult, err error) {
+	res := &VerificationResult{}
+	result = res
 	defer func() {
 		// recover from panic if one occurred.
 		if r := recover(); r != nil {
@@ -261,7 +306,6 @@ func UnmarshalTV(data []byte, inter interface{}) (verified bool, err error) {
 				// Fallback err (per specs, error strings should be lowercase w/o punctuation
 				err = errors.New("unknown panic")
 			}
-			verified = false
 		}
 	}()
 	// log.Println("in UnmarshalTv")
@@ -355,7 +399,7 @@ func UnmarshalTV(data []byte, inter interface{}) (verified bool, err error) {
 			// actualSize, actualSizeBytes, _, err := parseASN1Field(field, field.Type(), 1, 0, 0, 0, 0, data[currentPos:], nil, globalSizes)
 			// log.Printf("result tv struct parsing: %v %v %v", actualSize, actualSizeBytes, err)
 			if err != nil {
-				return false, err
+				return res, err
 			}
 			if field.Kind() == reflect.Slice {
 				field.Set(reflect.Append(field, parseIntoField))
@@ -411,6 +455,8 @@ func UnmarshalTV(data []byte, inter interface{}) (verified bool, err error) {
 			}
 		}
 	}
+	// FORENSE: el certificado de firma solo es de confianza si Decode() devuelve nil, lo que ahora
+	// EXIGE que la cadena valide hasta ERCA (firma del cert valida contra su CA y ventana de validez).
 	signCertificateFirstGenValid := false
 	if err := signCertificateFirstGen.Decode(); err == nil {
 		signCertificateFirstGenValid = true
@@ -419,53 +465,56 @@ func UnmarshalTV(data []byte, inter interface{}) (verified bool, err error) {
 	if err := signCertificateSecondGen.Decode(); err == nil {
 		signCertificateSecondGenValid = true
 	}
-	verificationStarted := false
-	verified = false
-	if signCertificateFirstGenValid || signCertificateSecondGenValid {
-		// verify the individual fields in a second pass, since only now we know the certificate
-		for _, vr := range verifyRanges {
-			var certValue reflect.Value
-			switch vr.gen {
-			case 1:
-				if signCertificateFirstGenValid {
-					certValue = reflect.ValueOf(signCertificateFirstGen)
-				}
-			case 2:
-				if signCertificateSecondGenValid {
-					certValue = reflect.ValueOf(signCertificateSecondGen)
-				}
+	// verify the individual blocks in a second pass, since only now we know the certificate.
+	// FORENSE: la agregacion es ESTRICTA. CADA bloque firmado (cada verifyRange) se contabiliza.
+	// Antes, un bloque sin cert de confianza se SALTABA con `continue` sin marcar fallo, de modo
+	// que una cobertura parcial (p. ej. solo el overview firmado) se reportaba como "valid".
+	for _, vr := range verifyRanges {
+		var certValue reflect.Value
+		switch vr.gen {
+		case 1:
+			if signCertificateFirstGenValid {
+				certValue = reflect.ValueOf(signCertificateFirstGen)
 			}
-			if !certValue.IsValid() {
-				// we may not have a cert for this generation
-				continue
+		case 2:
+			if signCertificateSecondGenValid {
+				certValue = reflect.ValueOf(signCertificateSecondGen)
 			}
-			dataValue := reflect.ValueOf(data[vr.start : vr.start+vr.length])
-			res := vr.method.Func.Call([]reflect.Value{vr.field, certValue, dataValue})
-			if len(res) > 1 {
-				success := res[0].Bool()
-				var err error
-				if e, ok := res[1].Interface().(error); ok {
-					err = e
-				}
-				ver := false
-				if success && err == nil {
-					ver = true
-				}
-				if verifiedField := vr.field.FieldByName("Verified"); verifiedField.IsValid() && verifiedField.CanSet() {
-					verifiedField.SetBool(ver)
-				}
-				if !verificationStarted {
-					verified = ver
-				} else {
-					verified = verified && ver
-				}
-			} else {
-				verified = false
+		}
+		if !certValue.IsValid() {
+			// no hay cert de confianza para la generacion de este bloque: no se puede verificar.
+			// El bloque NO se da por bueno ni se ignora; cuenta como no_cert.
+			res.noteNoCert()
+			continue
+		}
+		dataValue := reflect.ValueOf(data[vr.start : vr.start+vr.length])
+		callRes := vr.method.Func.Call([]reflect.Value{vr.field, certValue, dataValue})
+		if len(callRes) > 1 {
+			success := callRes[0].Bool()
+			var verr error
+			if e, ok := callRes[1].Interface().(error); ok {
+				verr = e
 			}
-			verificationStarted = true
+			ver := success && verr == nil
+			if verifiedField := vr.field.FieldByName("Verified"); verifiedField.IsValid() && verifiedField.CanSet() {
+				verifiedField.SetBool(ver)
+			}
+			switch {
+			case verr != nil:
+				// error de cripto/parseo al verificar la firma del bloque
+				log.Printf("error: could not verify vu block: %v", verr)
+				res.noteError()
+			case ver:
+				res.noteOK()
+			default:
+				// firma presente que no valida -> manipulacion
+				res.noteInvalid()
+			}
+		} else {
+			res.noteError()
 		}
 	}
-	return verified, nil
+	return res, nil
 }
 
 // based on the reflect.Type, try to determine the total size of the element
