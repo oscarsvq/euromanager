@@ -232,8 +232,14 @@ func (v *Vu) SignCertificateSecondGen() CertificateSecondGen {
 		for _, c := range v.VuOverviewSecondGen.MemberStateCertificateRecordArray.Records {
 			dc := CertificateSecondGen(c)
 			if err := dc.Decode(); err == nil {
-				if _, ok := PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference]; !ok { // we could check for validity here. However, the validity check seems broken, at least for the data tested (i.e. the member state certificate given here is signed, but the signature cannot be verified vs the ca).
-					PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference] = *dc.DecodedCertificate
+				// FORENSE: solo se inserta en el almacen de confianza si Decode() devolvio nil,
+				// lo que ahora EXIGE que la firma del certificado valide contra su CA (cadena
+				// hasta ERCA). Un certificado MS/CA incrustado en el archivo subido no se confia
+				// "a ojo": tiene que encadenar criptograficamente al ancla ERCA.
+				if dc.DecodedCertificate.Valid {
+					if _, ok := PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference]; !ok {
+						PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference] = *dc.DecodedCertificate
+					}
 				}
 			}
 		}
@@ -243,8 +249,14 @@ func (v *Vu) SignCertificateSecondGen() CertificateSecondGen {
 		for _, c := range v.VuOverviewSecondGenV2.MemberStateCertificateRecordArray.Records {
 			dc := CertificateSecondGen(c)
 			if err := dc.Decode(); err == nil {
-				if _, ok := PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference]; !ok { // we could check for validity here. However, the validity check seems broken, at least for the data tested (i.e. the member state certificate given here is signed, but the signature cannot be verified vs the ca).
-					PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference] = *dc.DecodedCertificate
+				// FORENSE: solo se inserta en el almacen de confianza si Decode() devolvio nil,
+				// lo que ahora EXIGE que la firma del certificado valide contra su CA (cadena
+				// hasta ERCA). Un certificado MS/CA incrustado en el archivo subido no se confia
+				// "a ojo": tiene que encadenar criptograficamente al ancla ERCA.
+				if dc.DecodedCertificate.Valid {
+					if _, ok := PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference]; !ok {
+						PKsSecondGen[dc.DecodedCertificate.CertificateBody.CertificateHolderReference] = *dc.DecodedCertificate
+					}
 				}
 			}
 		}
@@ -1657,6 +1669,27 @@ func (c *CertificateFirstGen) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Errores centinela de validacion de la cadena de certificados.
+// Se usan para distinguir el estado forense del resultado (valid|invalid|no_cert|error).
+var (
+	// ErrCertNoCA indica que no se pudo localizar la CA emisora en el almacen de confianza
+	// (no se puede construir la cadena hasta ERCA). Mapea a "no_cert".
+	ErrCertNoCA = errors.New("ca certificate not found in trust store")
+	// ErrCertInvalidSignature indica que la firma del certificado NO valida contra su CA.
+	// El certificado es repudiable. Mapea a "invalid".
+	ErrCertInvalidSignature = errors.New("certificate signature does not validate against ca")
+	// ErrCertOutOfValidity indica que el certificado esta fuera de su ventana de validez
+	// respecto a la hora de referencia del archivo. Mapea a "invalid".
+	ErrCertOutOfValidity = errors.New("certificate outside validity window")
+)
+
+// VerificationReferenceTime, si es distinto de cero, es la hora de referencia del archivo
+// (p. ej. la hora de descarga) contra la que se comprueba la ventana de validez de los
+// certificados de 2a generacion. Si es cero, NO se comprueba la ventana (se evita asi
+// invalidar por error archivos forenses historicos cuyo contexto temporal no esta disponible).
+// Es responsabilidad del llamante fijarlo (y restablecerlo) alrededor de la decodificacion.
+var VerificationReferenceTime time.Time
+
 type CertificateSecondGen struct {
 	DecodedCertificate *DecodedCertificateSecondGen `aper:"-" json:"-"`                                 // make sure this is not the last field in the struct
 	Certificate        []byte                       `aper:"size=204..341" json:"certificate,omitempty"` // see 2.41.: 204..341 bytes
@@ -1867,9 +1900,12 @@ func (c *CertificateSecondGen) Decode() error {
 			y = caPK.CertificateBody.PublicKey.PublicPoint.Y
 			byteLen = (curve.Params().BitSize + 7) >> 3
 		} else {
+			// FORENSE: no se puede localizar la CA emisora -> la cadena hasta ERCA no se puede
+			// construir. El cuerpo se decodifica para inspeccion, pero el certificado NO es de
+			// confianza: Valid=false y se devuelve un error distinguible (mapea a no_cert).
 			c.DecodedCertificate = &decodedCertificate
 			log.Printf("warn: could not find ca pk %x, cannot verify", decodedCertificate.CertificateBody.CertificateAuthorityReference)
-			return nil
+			return ErrCertNoCA
 		}
 	}
 
@@ -1921,6 +1957,27 @@ func (c *CertificateSecondGen) Decode() error {
 	}
 	valid := ecdsa.Verify(&pub, hash, r, s)
 	decodedCertificate.Valid = valid
+	c.DecodedCertificate = &decodedCertificate
+	// FORENSE: si la firma del certificado NO valida contra su CA, el certificado es
+	// repudiable. Antes se devolvia nil incondicionalmente y .Valid no se leia nunca en la
+	// ruta de verificacion, de modo que un certificado con cadena rota se daba por bueno.
+	if !valid {
+		return ErrCertInvalidSignature
+	}
+	// FORENSE: comprobacion de la ventana de validez contra la hora de referencia del archivo.
+	// Solo se aplica si el llamante fijo VerificationReferenceTime (si no, se omite para no
+	// invalidar por error archivos historicos). Tambien se exige coherencia interna de fechas.
+	if decodedCertificate.CertificateBody.CertificateEffectiveDate.After(decodedCertificate.CertificateBody.CertificateExpirationDate) {
+		decodedCertificate.Valid = false
+		return ErrCertOutOfValidity
+	}
+	if !VerificationReferenceTime.IsZero() {
+		ref := VerificationReferenceTime
+		if ref.Before(decodedCertificate.CertificateBody.CertificateEffectiveDate) || ref.After(decodedCertificate.CertificateBody.CertificateExpirationDate) {
+			decodedCertificate.Valid = false
+			return ErrCertOutOfValidity
+		}
+	}
 	return nil
 }
 

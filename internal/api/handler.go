@@ -51,7 +51,7 @@ func HandleParse(w http.ResponseWriter, r *http.Request) {
 	var (
 		fileType   string
 		generation string
-		verified   bool
+		sigStatus  string
 		parsed     any
 	)
 
@@ -61,11 +61,13 @@ func HandleParse(w http.ResponseWriter, r *http.Request) {
 		generation = detectVUGeneration(data)
 
 		var vu decoder.Vu
-		verified, err = decoder.UnmarshalTV(data, &vu)
+		var res *decoder.VerificationResult
+		res, err = decoder.VerifyTV(data, &vu)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "parse_error", "Error parseando archivo VU: "+err.Error())
 			return
 		}
+		sigStatus = res.Status()
 		parsed = vu
 	} else {
 		// Archivo de tarjeta de conductor
@@ -73,17 +75,14 @@ func HandleParse(w http.ResponseWriter, r *http.Request) {
 		generation = detectCardGeneration(data)
 
 		var card decoder.Card
-		verified, err = decoder.UnmarshalTLV(data, &card)
+		var res *decoder.VerificationResult
+		res, err = decoder.VerifyTLV(data, &card)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "parse_error", "Error parseando tarjeta: "+err.Error())
 			return
 		}
+		sigStatus = res.Status()
 		parsed = card
-	}
-
-	sigStatus := "invalid"
-	if verified {
-		sigStatus = "valid"
 	}
 
 	resp := ParseResponse{

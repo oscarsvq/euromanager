@@ -36,8 +36,8 @@ func TestParseDriverCard(t *testing.T) {
 		t.Fatalf("error decodificando respuesta JSON: %v", err)
 	}
 
-	if resp.FileType != "card" {
-		t.Errorf("esperaba file_type \"card\", obtuve %q", resp.FileType)
+	if resp.FileType != "driver_card" {
+		t.Errorf("esperaba file_type \"driver_card\", obtuve %q", resp.FileType)
 	}
 
 	if resp.SignatureVerification.Status != "valid" {
@@ -70,8 +70,8 @@ func TestParseVehicleUnit(t *testing.T) {
 		t.Fatalf("error decodificando respuesta JSON: %v", err)
 	}
 
-	if resp.FileType != "vu" {
-		t.Errorf("esperaba file_type \"vu\", obtuve %q", resp.FileType)
+	if resp.FileType != "vehicle_unit" {
+		t.Errorf("esperaba file_type \"vehicle_unit\", obtuve %q", resp.FileType)
 	}
 
 	if resp.SignatureVerification.Status != "valid" {
