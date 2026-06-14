@@ -6,6 +6,11 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Canary nightly (03:00 UTC): corre vet + tests (incl. el golden de integracion
+    # con TGD reales y el test negativo de firma) aunque no haya push, para detectar
+    # regresiones por dependencias/entorno. GitHub avisa al owner si el cron falla.
+    - cron: '0 3 * * *'
 
 jobs:
   test:
