@@ -1,0 +1,32 @@
+# Build de la imagen del parser para Cloud Run.
+#
+# Existe por un motivo concreto: `gcloud run deploy --source .` no permite pasar
+# --build-arg, y sin el la imagen se compilaria sin VERSION. Como .dockerignore
+# excluye .git, el binario tampoco podria deducirla del repo y acabaria
+# declarando "desconocida" en analysis_runs.parser_version — justo la
+# trazabilidad que el endurecimiento vino a arreglar.
+#
+# Uso (lo invoca scripts/deploy-cloudrun.ps1):
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_IMAGE=<imagen>,_VERSION=<version>
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - --build-arg
+      - VERSION=${_VERSION}
+      - --tag
+      - ${_IMAGE}
+      - .
+
+images:
+  - ${_IMAGE}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# El build de Go tarda ~2-3 min; 10 da margen sin dejar un build colgado
+# consumiendo minutos de la cuota gratuita.
+timeout: 600s
