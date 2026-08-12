@@ -8,11 +8,15 @@ import (
 	"github.com/traconiq/tachoparser/pkg/decoder"
 )
 
-// ParserVersion indica la versión actual del parser
-const ParserVersion = "0.1.0"
+// ParserVersion vive en version.go: se resuelve del build, no es un literal.
 
-// maxBodySize es el límite de tamaño del body (512 KB)
-const maxBodySize = 512 * 1024
+// maxBodySize es el límite de tamaño del body (10 MB).
+//
+// Debe coincidir con MAX_TGD_BYTES del núcleo de ingesta y con el límite del
+// frontend: la cadena entera declara 10 MB, y mientras esto valió 512 KB
+// cualquier archivo mayor —un VU con velocidad detallada de varios días— se
+// rechazaba aquí aunque el resto del sistema lo hubiera aceptado.
+const maxBodySize = 10 * 1024 * 1024
 
 // HandleHealth retorna el estado del servicio y la versión del parser
 func HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +43,7 @@ func HandleParse(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "body_too_large", "El archivo excede el límite de 512 KB")
+		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", "El archivo excede el límite de 10 MB")
 		return
 	}
 

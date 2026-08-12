@@ -1,0 +1,23 @@
+# Contexto de build minimo.
+#
+# testdata/ contiene archivos de tacografo REALES, con datos personales de un
+# conductor identificado (nombre, jornada, posiciones GNSS). Son imprescindibles
+# para los tests, pero no pintan nada en una imagen de produccion ni deben
+# viajar al servicio de build remoto: la minimizacion de datos tambien aplica a
+# lo que se sube a un tercero para compilar.
+testdata/
+
+# Historial y metadatos: la version se inyecta con --build-arg VERSION, asi que
+# el build no necesita el .git.
+.git/
+.github/
+.gitignore
+
+# Documentacion y utilidades que no entran en la compilacion.
+docs/
+*.md
+scripts/
+
+# Artefactos locales.
+*.exe
+eurotacho-api
