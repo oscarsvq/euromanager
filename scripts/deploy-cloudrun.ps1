@@ -127,13 +127,21 @@ if ($true) {
 
 # --- 3. Clave de API ---------------------------------------------------------
 Paso "Clave de API del parser"
-$actual = Consultar {
-    gcloud run services describe $Service --region=$Region `
-        --format="value(spec.template.spec.containers[0].env)"
-}
+# Se lee del servicio ya desplegado parseando JSON, no con un regex sobre el
+# texto: gcloud imprime {'name': 'PARSER_API_KEY', 'value': '...'} y cualquier
+# patron ingenuo falla en silencio. Y fallar aqui no es inocuo — se generaria una
+# clave nueva en CADA despliegue, invalidando la que Supabase tiene configurada y
+# rompiendo la ingesta con un 401 dificil de atribuir.
+$actual = Consultar { gcloud run services describe $Service --region=$Region --format=json }
 $claveExistente = $null
-if ($actual.Ok -and $actual.Salida -match 'PARSER_API_KEY[^A-Za-z0-9_-]+([A-Za-z0-9_-]{20,})') {
-    $claveExistente = $Matches[1]
+if ($actual.Ok) {
+    try {
+        $svc = $actual.Salida | ConvertFrom-Json
+        $entrada = $svc.spec.template.spec.containers[0].env | Where-Object { $_.name -eq "PARSER_API_KEY" }
+        if ($entrada) { $claveExistente = $entrada.value }
+    } catch {
+        Write-Warning "No se pudo leer la configuracion del servicio; se generara clave nueva."
+    }
 }
 
 if ($RotarApiKey -or -not $claveExistente) {
