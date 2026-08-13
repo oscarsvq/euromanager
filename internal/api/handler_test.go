@@ -99,6 +99,46 @@ func TestParseEmptyBody(t *testing.T) {
 	}
 }
 
+// El limite debe estar alineado con el resto de la cadena (10 MB). Cuando valia
+// 512 KB, un VU con velocidad detallada se rechazaba aqui aunque el frontend y
+// la Edge Function ya lo hubieran aceptado.
+func TestParseCuerpoDemasiadoGrande(t *testing.T) {
+	grande := make([]byte, maxBodySize+1024)
+
+	req := httptest.NewRequest(http.MethodPost, "/parse", bytes.NewReader(grande))
+	rec := httptest.NewRecorder()
+
+	HandleParse(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("esperaba HTTP 413, obtuve %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decodificando respuesta de error: %v", err)
+	}
+	if resp.Error != "body_too_large" {
+		t.Errorf("esperaba error \"body_too_large\", obtuve %q", resp.Error)
+	}
+}
+
+// Un archivo por debajo del limite nuevo pero por encima del viejo debe pasar
+// del control de tamano (llegara al parseo y fallara alli, que es otro asunto).
+func TestParseAceptaPorEncimaDelLimiteAntiguo(t *testing.T) {
+	data := make([]byte, 900*1024) // 900 KB: antes se rechazaba por tamano
+	data[0] = 0x76                 // cabecera de VU
+
+	req := httptest.NewRequest(http.MethodPost, "/parse", bytes.NewReader(data))
+	rec := httptest.NewRecorder()
+
+	HandleParse(rec, req)
+
+	if rec.Code == http.StatusRequestEntityTooLarge {
+		t.Fatal("900 KB no debe rechazarse por tamano con el limite de 10 MB")
+	}
+}
+
 func TestHealth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
