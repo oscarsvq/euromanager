@@ -773,12 +773,21 @@ type DecodedActivityChangeInfo struct {
 }
 
 func (a ActivityChangeInfo) Decode() DecodedActivityChangeInfo {
-	// this is a bit field
+	// this is a bit field (Annex 1B / Annex 1C, Appendix 1, §2.1)
 	// scpaattttttttttt
 	// s - 0: driver, 1: codriver
-	// c - 0: one man, 1: team
-	// p - 0: data inserted, 1: no data
-	// aa - 00: break, 01: on duty, 10: work, 11: drive
+	// c - DUAL MEANING:
+	//     data memory (VU) records: 0: single, 1: crew
+	//     card records with p=0:    0: single, 1: crew
+	//     card records with p=1:    0: UNKNOWN ('?'), 1: KNOWN (= manually entered)
+	//     This decoder exposes the bit as Team unconditionally; the contextual
+	//     interpretation for card records lives in the consumer (EuroTacho
+	//     web/src/lib/rules/card-activity-classification.ts).
+	// p - 0: card inserted, 1: card not inserted (withdrawn)
+	//     Withdrawal note: on withdrawal the VU writes p=1, c=0 and aa = the
+	//     activity selected at that moment; a later manual entry MAY overwrite
+	//     c and aa. So p=1,c=0 NEVER proves the following activity.
+	// aa - 00: break/rest, 01: availability, 10: work, 11: driving
 	// ttttttttttt - minutes since 0:00 that day
 	var v uint16
 	b := bytes.NewBuffer([]byte{a[0], a[1]})
